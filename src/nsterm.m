@@ -8353,18 +8353,16 @@ not_in_argv (NSString *arg)
 
       surface = [[EmacsSurface alloc] initWithSize:s
                                         ColorSpace:[[[self window] colorSpace]
-                                                     CGColorSpace]];
+                                                     CGColorSpace]
+                                             Scale:scale];
 
       /* Since we're using NSViewLayerContentsRedrawOnSetNeedsDisplay
          the layer's scale factor is not set automatically, so do it
          now.  */
-      [[self layer] setContentsScale:[[self window] backingScaleFactor]];
+      [[self layer] setContentsScale:scale];
     }
 
   CGContextRef context = [surface getContext];
-
-  CGContextTranslateCTM(context, 0, [surface getSize].height);
-  CGContextScaleCTM(context, scale, -scale);
 
   [NSGraphicsContext
     setCurrentContext:[NSGraphicsContext
@@ -8378,7 +8376,6 @@ not_in_argv (NSString *arg)
   NSTRACE ("[EmacsView unfocusDrawingBuffer]");
 
   [NSGraphicsContext setCurrentContext:nil];
-  [surface releaseContext];
   [self setNeedsDisplay:YES];
 }
 
@@ -8485,6 +8482,8 @@ not_in_argv (NSString *arg)
       unblock_input ();
       waiting_for_input = owfi;
     }
+
+  [surface releaseContext];
 }
 
 
@@ -9720,6 +9719,7 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
 
 - (id) initWithSize: (NSSize)s
          ColorSpace: (CGColorSpaceRef)cs
+              Scale: (CGFloat)scl
 {
   NSTRACE ("[EmacsSurface initWithSize:ColorSpace:]");
 
@@ -9728,6 +9728,7 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
   cache = [[NSMutableArray arrayWithCapacity:3] retain];
   size = s;
   colorSpace = cs;
+  scale = scl;
 
   return self;
 }
@@ -9764,50 +9765,58 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
    calls cannot be nested.  */
 - (CGContextRef) getContext
 {
-  IOSurfaceRef surface = NULL;
-
   NSTRACE ("[EmacsSurface getContextWithSize:]");
-  NSTRACE_MSG ("IOSurface count: %lu", [cache count] + (lastSurface ? 1 : 0));
 
-  for (id object in cache)
+  if (!context)
     {
-      if (!IOSurfaceIsInUse ((IOSurfaceRef)object))
-      {
-        surface = (IOSurfaceRef)object;
-        [cache removeObject:object];
-        break;
-      }
+      IOSurfaceRef surface = NULL;
+
+      NSTRACE_MSG ("IOSurface count: %lu", [cache count] + (lastSurface ? 1 : 0));
+
+      for (id object in cache)
+        {
+          if (!IOSurfaceIsInUse ((IOSurfaceRef)object))
+            {
+              surface = (IOSurfaceRef)object;
+              [cache removeObject:object];
+              break;
+            }
+        }
+
+      if (!surface)
+        {
+          int bytesPerRow = IOSurfaceAlignProperty (kIOSurfaceBytesPerRow,
+                                                    size.width * 4);
+
+          surface = IOSurfaceCreate
+            ((CFDictionaryRef)@{(id)kIOSurfaceWidth:[NSNumber numberWithInt:size.width],
+                (id)kIOSurfaceHeight:[NSNumber numberWithInt:size.height],
+                (id)kIOSurfaceBytesPerRow:[NSNumber numberWithInt:bytesPerRow],
+                (id)kIOSurfaceBytesPerElement:[NSNumber numberWithInt:4],
+                (id)kIOSurfacePixelFormat:[NSNumber numberWithUnsignedInt:'BGRA']});
+        }
+
+      IOReturn lockStatus = IOSurfaceLock (surface, 0, nil);
+      if (lockStatus != kIOReturnSuccess)
+        NSLog (@"Failed to lock surface: %x", lockStatus);
+
+      [self copyContentsTo:surface];
+
+      currentSurface = surface;
+
+      context = CGBitmapContextCreate (IOSurfaceGetBaseAddress (currentSurface),
+                                       IOSurfaceGetWidth (currentSurface),
+                                       IOSurfaceGetHeight (currentSurface),
+                                       8,
+                                       IOSurfaceGetBytesPerRow (currentSurface),
+                                       colorSpace,
+                                       (kCGImageAlphaPremultipliedFirst
+                                        | kCGBitmapByteOrder32Host));
+
+      CGContextTranslateCTM(context, 0, size.height);
+      CGContextScaleCTM(context, scale, -scale);
     }
 
-  if (!surface)
-    {
-      int bytesPerRow = IOSurfaceAlignProperty (kIOSurfaceBytesPerRow,
-                                                size.width * 4);
-
-      surface = IOSurfaceCreate
-        ((CFDictionaryRef)@{(id)kIOSurfaceWidth:[NSNumber numberWithInt:size.width],
-            (id)kIOSurfaceHeight:[NSNumber numberWithInt:size.height],
-            (id)kIOSurfaceBytesPerRow:[NSNumber numberWithInt:bytesPerRow],
-            (id)kIOSurfaceBytesPerElement:[NSNumber numberWithInt:4],
-            (id)kIOSurfacePixelFormat:[NSNumber numberWithUnsignedInt:'BGRA']});
-    }
-
-  IOReturn lockStatus = IOSurfaceLock (surface, 0, nil);
-  if (lockStatus != kIOReturnSuccess)
-    NSLog (@"Failed to lock surface: %x", lockStatus);
-
-  [self copyContentsTo:surface];
-
-  currentSurface = surface;
-
-  context = CGBitmapContextCreate (IOSurfaceGetBaseAddress (currentSurface),
-                                   IOSurfaceGetWidth (currentSurface),
-                                   IOSurfaceGetHeight (currentSurface),
-                                   8,
-                                   IOSurfaceGetBytesPerRow (currentSurface),
-                                   colorSpace,
-                                   (kCGImageAlphaPremultipliedFirst
-                                    | kCGBitmapByteOrder32Host));
   return context;
 }
 
@@ -9817,6 +9826,9 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
 - (void) releaseContext
 {
   NSTRACE ("[EmacsSurface releaseContextAndGetSurface]");
+
+  if (!context)
+    return;
 
   CGContextRelease (context);
   context = NULL;
