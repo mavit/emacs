@@ -9716,6 +9716,7 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
    probably be some sort of pruning job that removes excess
    surfaces.  */
 
+#define CACHE_MAX_SIZE 2
 
 - (id) initWithSize: (NSSize)s
          ColorSpace: (CGColorSpaceRef)cs
@@ -9725,7 +9726,7 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
 
   [super init];
 
-  cache = [[NSMutableArray arrayWithCapacity:3] retain];
+  cache = [[NSMutableArray arrayWithCapacity:CACHE_MAX_SIZE] retain];
   size = s;
   colorSpace = cs;
   scale = scl;
@@ -9741,8 +9742,6 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
 
   if (currentSurface)
     CFRelease (currentSurface);
-  if (lastSurface)
-    CFRelease (lastSurface);
 
   for (id object in cache)
     CFRelease ((IOSurfaceRef)object);
@@ -9765,7 +9764,7 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
    calls cannot be nested.  */
 - (CGContextRef) getContext
 {
-  NSTRACE ("[EmacsSurface getContextWithSize:]");
+  NSTRACE ("[EmacsSurface getContext]");
 
   if (!context)
     {
@@ -9783,7 +9782,15 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
             }
         }
 
-      if (!surface)
+      if (!surface && [cache count] >= CACHE_MAX_SIZE)
+        {
+          /* Just grab the first one off the cache.  This may result
+             in tearing effects.  The alternative is to wait for one
+             of the surfaces to become free.  */
+          surface = (IOSurfaceRef)[cache firstObject];
+          [cache removeObject:(id)surface];
+        }
+      else if (!surface)
         {
           int bytesPerRow = IOSurfaceAlignProperty (kIOSurfaceBytesPerRow,
                                                     size.width * 4);
@@ -9837,11 +9844,8 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
   if (lockStatus != kIOReturnSuccess)
     NSLog (@"Failed to unlock surface: %x", lockStatus);
 
-  /* Put lastSurface back on the end of the cache.  It may not have
-     been displayed on the screen yet, but we probably want the new
-     data and not some stale data anyway.  */
-  if (lastSurface)
-    [cache addObject:(id)lastSurface];
+  /* Put currentSurface back on the end of the cache.  */
+  [cache addObject:(id)currentSurface];
   lastSurface = currentSurface;
   currentSurface = NULL;
 }
@@ -9866,7 +9870,7 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
 
   NSTRACE ("[EmacsSurface copyContentsTo:]");
 
-  if (! lastSurface)
+  if (!lastSurface || lastSurface == destination)
     return;
 
   lockStatus = IOSurfaceLock (lastSurface, kIOSurfaceLockReadOnly, nil);
@@ -9886,6 +9890,7 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
     NSLog (@"Failed to unlock source surface: %x", lockStatus);
 }
 
+#undef CACHE_MAX_SIZE
 
 @end /* EmacsSurface */
 
