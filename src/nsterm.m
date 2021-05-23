@@ -8482,8 +8482,6 @@ not_in_argv (NSString *arg)
       unblock_input ();
       waiting_for_input = owfi;
     }
-
-  [surface releaseContext];
 }
 
 
@@ -8515,7 +8513,11 @@ not_in_argv (NSString *arg)
      There's a private method, -[CALayer setContentsChanged], that we
      could use to force it, but we shouldn't often get the same
      surface twice in a row.  */
+  [surface releaseContext];
   [[self layer] setContents:(id)[surface getSurface]];
+  [surface performSelectorOnMainThread:@selector (getContext)
+                            withObject:nil
+                         waitUntilDone:NO];
 }
 #endif
 
