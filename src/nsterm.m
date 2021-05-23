@@ -8515,6 +8515,10 @@ not_in_argv (NSString *arg)
      surface twice in a row.  */
   [surface releaseContext];
   [[self layer] setContents:(id)[surface getSurface]];
+
+  if (![self wantsLayer])
+    [self setWantsLayer:YES];
+
   [surface performSelectorOnMainThread:@selector (getContext)
                             withObject:nil
                          waitUntilDone:NO];
@@ -9718,8 +9722,6 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
    probably be some sort of pruning job that removes excess
    surfaces.  */
 
-#define CACHE_MAX_SIZE 2
-
 - (id) initWithSize: (NSSize)s
          ColorSpace: (CGColorSpaceRef)cs
               Scale: (CGFloat)scl
@@ -9728,10 +9730,10 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
 
   [super init];
 
-  cache = [[NSMutableArray arrayWithCapacity:CACHE_MAX_SIZE] retain];
   size = s;
   colorSpace = cs;
   scale = scl;
+  surfaceIsLocked = NO;
 
   return self;
 }
@@ -9739,16 +9741,15 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
 
 - (void) dealloc
 {
-  if (context)
-    CGContextRelease (context);
+  if (currentContext)
+    CGContextRelease (currentContext);
+  if (lastContext)
+    CGContextRelease (lastContext);
 
   if (currentSurface)
     CFRelease (currentSurface);
-
-  for (id object in cache)
-    CFRelease ((IOSurfaceRef)object);
-
-  [cache release];
+  if (lastSurface)
+    CFRelease (lastSurface);
 
   [super dealloc];
 }
@@ -9768,65 +9769,50 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
 {
   NSTRACE ("[EmacsSurface getContext]");
 
-  if (!context)
+  if (!currentContext)
     {
-      IOSurfaceRef surface = NULL;
+      int bytesPerRow = IOSurfaceAlignProperty (kIOSurfaceBytesPerRow,
+                                                size.width * 4);
 
-      NSTRACE_MSG ("IOSurface count: %lu", [cache count] + (lastSurface ? 1 : 0));
+      currentSurface = IOSurfaceCreate
+        ((CFDictionaryRef)@{(id)kIOSurfaceWidth:[NSNumber numberWithInt:size.width],
+            (id)kIOSurfaceHeight:[NSNumber numberWithInt:size.height],
+            (id)kIOSurfaceBytesPerRow:[NSNumber numberWithInt:bytesPerRow],
+            (id)kIOSurfaceBytesPerElement:[NSNumber numberWithInt:4],
+            (id)kIOSurfacePixelFormat:[NSNumber numberWithUnsignedInt:'BGRA']});
 
-      for (id object in cache)
-        {
-          if (!IOSurfaceIsInUse ((IOSurfaceRef)object))
-            {
-              surface = (IOSurfaceRef)object;
-              [cache removeObject:object];
-              break;
-            }
-        }
-
-      if (!surface && [cache count] >= CACHE_MAX_SIZE)
-        {
-          /* Just grab the first one off the cache.  This may result
-             in tearing effects.  The alternative is to wait for one
-             of the surfaces to become free.  */
-          surface = (IOSurfaceRef)[cache firstObject];
-          [cache removeObject:(id)surface];
-        }
-      else if (!surface)
-        {
-          int bytesPerRow = IOSurfaceAlignProperty (kIOSurfaceBytesPerRow,
-                                                    size.width * 4);
-
-          surface = IOSurfaceCreate
-            ((CFDictionaryRef)@{(id)kIOSurfaceWidth:[NSNumber numberWithInt:size.width],
-                (id)kIOSurfaceHeight:[NSNumber numberWithInt:size.height],
-                (id)kIOSurfaceBytesPerRow:[NSNumber numberWithInt:bytesPerRow],
-                (id)kIOSurfaceBytesPerElement:[NSNumber numberWithInt:4],
-                (id)kIOSurfacePixelFormat:[NSNumber numberWithUnsignedInt:'BGRA']});
-        }
-
-      IOReturn lockStatus = IOSurfaceLock (surface, 0, nil);
+      IOReturn lockStatus = IOSurfaceLock (currentSurface, 0, nil);
       if (lockStatus != kIOReturnSuccess)
         NSLog (@"Failed to lock surface: %x", lockStatus);
 
-      [self copyContentsTo:surface];
+      surfaceIsLocked = YES;
 
-      currentSurface = surface;
+      [self copyContentsTo:currentSurface];
 
-      context = CGBitmapContextCreate (IOSurfaceGetBaseAddress (currentSurface),
-                                       IOSurfaceGetWidth (currentSurface),
-                                       IOSurfaceGetHeight (currentSurface),
-                                       8,
-                                       IOSurfaceGetBytesPerRow (currentSurface),
-                                       colorSpace,
-                                       (kCGImageAlphaPremultipliedFirst
-                                        | kCGBitmapByteOrder32Host));
+      currentContext = CGBitmapContextCreate (IOSurfaceGetBaseAddress (currentSurface),
+                                              IOSurfaceGetWidth (currentSurface),
+                                              IOSurfaceGetHeight (currentSurface),
+                                              8,
+                                              IOSurfaceGetBytesPerRow (currentSurface),
+                                              colorSpace,
+                                              (kCGImageAlphaPremultipliedFirst
+                                               | kCGBitmapByteOrder32Host));
 
-      CGContextTranslateCTM(context, 0, size.height);
-      CGContextScaleCTM(context, scale, -scale);
+      CGContextTranslateCTM(currentContext, 0, size.height);
+      CGContextScaleCTM(currentContext, scale, -scale);
     }
 
-  return context;
+  if (!surfaceIsLocked)
+    {
+      IOReturn lockStatus = IOSurfaceLock (currentSurface, 0, nil);
+      if (lockStatus != kIOReturnSuccess)
+        NSLog (@"Failed to lock surface: %x", lockStatus);
+      surfaceIsLocked = YES;
+
+      [self copyContentsTo:currentSurface];
+    }
+
+  return currentContext;
 }
 
 
@@ -9836,20 +9822,21 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
 {
   NSTRACE ("[EmacsSurface releaseContextAndGetSurface]");
 
-  if (!context)
+  if (!currentContext)
     return;
-
-  CGContextRelease (context);
-  context = NULL;
 
   IOReturn lockStatus = IOSurfaceUnlock (currentSurface, 0, nil);
   if (lockStatus != kIOReturnSuccess)
     NSLog (@"Failed to unlock surface: %x", lockStatus);
 
-  /* Put currentSurface back on the end of the cache.  */
-  [cache addObject:(id)currentSurface];
+  surfaceIsLocked = NO;
+
+  IOSurfaceRef tmpsfc = lastSurface;
+  CGContextRef tmpCtx = lastContext;
   lastSurface = currentSurface;
-  currentSurface = NULL;
+  lastContext = currentContext;
+  currentSurface = tmpsfc;
+  currentContext = tmpCtx;
 }
 
 
@@ -9892,7 +9879,6 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
     NSLog (@"Failed to unlock source surface: %x", lockStatus);
 }
 
-#undef CACHE_MAX_SIZE
 
 @end /* EmacsSurface */
 

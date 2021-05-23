@@ -718,12 +718,13 @@ typedef id instancetype;
 #ifdef NS_DRAW_TO_BUFFER
 @interface EmacsSurface : NSObject
 {
-  NSMutableArray *cache;
   NSSize size;
   CGColorSpaceRef colorSpace;
   IOSurfaceRef currentSurface;
   IOSurfaceRef lastSurface;
-  CGContextRef context;
+  CGContextRef currentContext;
+  CGContextRef lastContext;
+  BOOL surfaceIsLocked;
   CGFloat scale;
 }
 - (id) initWithSize: (NSSize)s ColorSpace: (CGColorSpaceRef)cs Scale: (CGFloat)scale;
