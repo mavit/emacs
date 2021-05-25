@@ -108,6 +108,13 @@ avoid security issues when executing untrusted code.  See the manual
 page for 'seccomp' system call, for details about Secure Computing
 filters.
 
+** Launching Emacs from a GUI now defaults to trying emacsclient.
+When launching Emacs via a freedesktop.org-compatible GUI, it is now
+the default to try to use emacsclient to open the file in an existing
+Emacs frame.  Opening a new frame in an existing Emacs or a separate
+instance of Emacs are available as an alternative action (performed,
+for example, by right-clicking on the icon).
+
 
 * Changes in Emacs 28.1
 
