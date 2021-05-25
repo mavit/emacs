@@ -693,8 +693,33 @@ See `icomplete-mode' and `minibuffer-setup-hook'."
               (put-text-property 0 1 'cursor t text)
               (overlay-put icomplete-overlay 'after-string text))))))))
 
-(defun icomplete--render-vertical (comps)
-  ;; First attempt to keep selection stable.
+(defun icomplete--affixate (md prospects)
+  "Affixate PROSPECTS given completion metadata MD.
+Return a list of (COMP PREFIX SUFFIX)."
+  (let ((aff-fun (or (completion-metadata-get md 'affixation-function)
+                     (plist-get completion-extra-properties :affixation-function)))
+        (ann-fun (or (completion-metadata-get md 'annotation-function)
+                     (plist-get completion-extra-properties :annotation-function))))
+    (cond (aff-fun
+           (funcall aff-fun prospects))
+          (ann-fun
+           (mapcar
+            (lambda (comp)
+              (let ((suffix (or (funcall ann-fun comp) "")))
+                (list comp ""
+                      ;; The default completion UI adds the
+                      ;; `completions-annotations' face if no
+                      ;; other faces are present.
+                      (if (text-property-not-all 0 (length suffix) 'face nil suffix)
+                          suffix
+                        (propertize suffix 'face 'completions-annotations)))))
+            prospects))
+          (prospects))))
+
+(cl-defun icomplete--render-vertical (comps md)
+  ;; This is loopapalooza
+  ;;
+  ;; First, attempt to keep selection stable.
   (when (and icomplete--last-selected
              (null icomplete-rotate))
     (cl-loop
@@ -710,6 +735,9 @@ See `icomplete-mode' and `minibuffer-setup-hook'."
       comps)
      and return nil
      do (push comp preds)))
+  ;; The ugliest loop, collect the completions before and after the
+  ;; selected one, considering scrolling positions.
+  ;;
   (cl-loop
    with preds = (and (null icomplete-rotate) icomplete--comp-predecessors)
    with max-lines = (1- (min icomplete-prospects-height
@@ -732,17 +760,38 @@ See `icomplete-mode' and `minibuffer-setup-hook'."
    (setq neighbour (pop succs)) into after
    while neighbour
    finally
-   (cl-return
-    (concat " " icomplete-separator
-            (mapconcat
-             #'identity
-             (nconc before
-                    (list
-                     (setq icomplete--last-selected
-                           (propertize (car comps) 'face
-                                       'icomplete-selected-match)))
-                    after)
-             icomplete-separator)))))
+   ;; Now figure out spacing and layout
+   ;;
+   (cl-loop
+    with torender
+    = (nconc before
+             (list
+              (setq icomplete--last-selected
+                    (propertize (car comps) 'face
+                                'icomplete-selected-match)))
+             after)
+    with triplets = (icomplete--affixate md torender)
+    initially (when (eq triplets torender)
+                (cl-return-from icomplete--render-vertical
+                  (concat
+                   " \n"
+                   (mapconcat #'identity torender icomplete-separator))))
+    for (comp prefix) in triplets
+    maximizing (length prefix) into max-prefix-len
+    maximizing (length comp) into max-comp-len
+    finally
+    ;; Finally, render
+    ;;
+    (cl-return-from icomplete--render-vertical
+      (concat
+       " \n"
+       (cl-loop for (comp prefix suffix) in triplets
+                concat prefix
+                concat (make-string (- max-prefix-len (length prefix)) ? )
+                concat comp
+                concat (make-string (- max-comp-len (length comp)) ? )
+                concat suffix
+                concat icomplete-separator))))))
 
 ;;;_ > icomplete-completions (name candidates predicate require-match)
 (defun icomplete-completions (name candidates predicate require-match)
@@ -788,7 +837,7 @@ matches exist."
 	(progn ;;(debug (format "Candidates=%S field=%S" candidates name))
 	  (format " %sNo matches%s" open-bracket close-bracket))
       (if icomplete-vertical-mode
-	  (icomplete--render-vertical comps)
+	  (icomplete--render-vertical comps md)
 	(let* ((last (if (consp comps) (last comps)))
 	       (base-size (cdr last))
 	       (most-try
