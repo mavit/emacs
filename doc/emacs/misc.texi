@@ -1757,6 +1757,11 @@ expression @code{(+ 1 2)} on the @samp{foo} server, and returns
 @code{3}.  (If there is no server with that name, an error is
 signaled.)  Currently, this feature is mainly useful for developers.
 
+  If you launch Emacs from a desktop environment, you may use the
+@dfn{Emacs (Client)} menu entry to connect to an Emacs server with
+@command{emacsclient}.  If the daemon is not already running, it will
+be started for you.
+
 @menu
 * TCP Emacs server::     Listening to a TCP socket.
 * Invoking emacsclient:: Connecting to the Emacs server.

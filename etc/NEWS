@@ -539,6 +539,11 @@ an edit instead of marking it as "Done" (which the 'C-x #' command
 does).  The 'emacsclient' program exits with an abnormal status as
 result of this command.
 
++++
+*** New desktop integration for connecting to the server.
+You may use the "Emacs (Client)" menu entry to open files in an
+existing Emacs instance rather than starting a new one.
+
 ** Perl mode
 
 ---
